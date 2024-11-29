@@ -18,6 +18,8 @@ package printers
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"reflect"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -40,6 +42,8 @@ type TableGenerator interface {
 // PrintHandler - interface to handle printing provided an array of metav1.TableColumnDefinition
 type PrintHandler interface {
 	TableHandler(columns []metav1.TableColumnDefinition, printFunc interface{}) error
+
+	UnstructuredTableHandler(columns []metav1.TableColumnDefinition, printFunc interface{}, kind schema.GroupVersionKind) error
 }
 
 type handlerEntry struct {
@@ -51,7 +55,8 @@ type handlerEntry struct {
 // a table for a specific resource. The table is printed with a TablePrinter using
 // PrintObj().
 type HumanReadableGenerator struct {
-	handlerMap map[reflect.Type]*handlerEntry
+	handlerMap             map[reflect.Type]*handlerEntry
+	unstructuredHandlerMap map[schema.GroupVersionKind]*handlerEntry
 }
 
 var _ TableGenerator = &HumanReadableGenerator{}
@@ -140,6 +145,34 @@ func (h *HumanReadableGenerator) TableHandler(columnDefinitions []metav1.TableCo
 		return err
 	}
 	h.handlerMap[objType] = entry
+	return nil
+}
+
+// UnstructuredTableHandler adds a print handler with a given set of columns to HumanReadableGenerator instance.
+// See ValidateRowPrintHandlerFunc for required method signature.
+func (h *HumanReadableGenerator) UnstructuredTableHandler(columnDefinitions []metav1.TableColumnDefinition, printFunc interface{}, kind schema.GroupVersionKind) error {
+	printFuncValue := reflect.ValueOf(printFunc)
+	if err := ValidateRowPrintHandlerFunc(printFuncValue); err != nil {
+		utilruntime.HandleError(fmt.Errorf("unable to register print function: %v", err))
+		return err
+	}
+	funcType := printFuncValue.Type()
+	if funcType.In(0) != reflect.TypeOf((*unstructured.Unstructured)(nil)) &&
+		funcType.In(0) != reflect.TypeOf((*unstructured.UnstructuredList)(nil)) {
+		return fmt.Errorf("invalid print handler. The expected signature is: " +
+			"func handler(obj unstructured.Unstructured , options GenerateOptions) ([]metav1.TableRow, error) or " +
+			"func handler(obj unstructured.UnstructuredList , options GenerateOptions) ([]metav1.TableRow, error)")
+	}
+	entry := &handlerEntry{
+		columnDefinitions: columnDefinitions,
+		printFunc:         printFuncValue,
+	}
+	if _, ok := h.unstructuredHandlerMap[kind]; ok {
+		err := fmt.Errorf("registered duplicate printer for %v", kind)
+		utilruntime.HandleError(err)
+		return err
+	}
+	h.unstructuredHandlerMap[kind] = entry
 	return nil
 }
 
